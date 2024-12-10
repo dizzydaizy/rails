@@ -48,48 +48,44 @@ module ActiveRecord
             # made since we established the connection
             raw_connection.query_options[:database_timezone] = default_timezone
 
-            result = if binds.nil? || binds.empty?
-              ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-                result = raw_connection.query(sql)
-                # Ref: https://github.com/brianmario/mysql2/pull/1383
-                # As of mysql2 0.5.6 `#affected_rows` might raise Mysql2::Error if a prepared statement
-                # from that same connection was GCed while `#query` released the GVL.
-                # By avoiding to call `#affected_rows` when we have a result, we reduce the likeliness
-                # of hitting the bug.
-                @affected_rows_before_warnings = result&.size || raw_connection.affected_rows
-                result
+            result = nil
+            if binds.nil? || binds.empty?
+              result = raw_connection.query(sql)
+              # Ref: https://github.com/brianmario/mysql2/pull/1383
+              # As of mysql2 0.5.6 `#affected_rows` might raise Mysql2::Error if a prepared statement
+              # from that same connection was GCed while `#query` released the GVL.
+              # By avoiding to call `#affected_rows` when we have a result, we reduce the likeliness
+              # of hitting the bug.
+              @affected_rows_before_warnings = result&.size || raw_connection.affected_rows
+            elsif prepare
+              stmt = @statements[sql] ||= raw_connection.prepare(sql)
+              begin
+                result = stmt.execute(*type_casted_binds)
+                @affected_rows_before_warnings = stmt.affected_rows
+              rescue ::Mysql2::Error
+                @statements.delete(sql)
+                raise
               end
-              result
             else
-              if prepare
-                stmt = @statements[sql] ||= raw_connection.prepare(sql)
-              else
-                stmt = raw_connection.prepare(sql)
-              end
+              stmt = raw_connection.prepare(sql)
 
               begin
-                ActiveSupport::Dependencies.interlock.permit_concurrent_loads do
-                  result = stmt.execute(*type_casted_binds)
-                  @affected_rows_before_warnings = stmt.affected_rows
+                result = stmt.execute(*type_casted_binds)
+                @affected_rows_before_warnings = stmt.affected_rows
 
-                  # Ref: https://github.com/brianmario/mysql2/pull/1383
-                  # by eagerly closing uncached prepared statements, we also reduce the chances of
-                  # that bug happening. It can still happen if `#execute` is used as we have no callback
-                  # to eagerly close the statement.
-                  result.instance_variable_set(:@_ar_stmt_to_close, stmt) if result && !prepare
-                  result
-                end
-              rescue ::Mysql2::Error
-                if prepare
-                  @statements.delete(sql)
+                # Ref: https://github.com/brianmario/mysql2/pull/1383
+                # by eagerly closing uncached prepared statements, we also reduce the chances of
+                # that bug happening. It can still happen if `#execute` is used as we have no callback
+                # to eagerly close the statement.
+                if result
+                  result.instance_variable_set(:@_ar_stmt_to_close, stmt)
                 else
                   stmt.close
                 end
-
+              rescue ::Mysql2::Error
+                stmt.close
                 raise
               end
-
-              result
             end
 
             notification_payload[:affected_rows] = @affected_rows_before_warnings
@@ -98,7 +94,6 @@ module ActiveRecord
             raw_connection.abandon_results!
 
             verified!
-            handle_warnings(sql)
             result
           ensure
             if reset_multi_statement && active?
