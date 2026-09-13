@@ -1,3 +1,11 @@
+*   Fix PostgreSQL primary key introspection for covering indexes.
+
+    `pg_index.indkey` includes non-key columns added with `INCLUDE`. Primary
+    keys are now read from `pg_constraint.conkey`, so those columns remain
+    writable during bulk upserts.
+
+    *Aleksandar Maksimovic*
+
 *   Re-enable PostgreSQL triggers when the block given to `disable_referential_integrity` raises.
 
     On PostgreSQL versions without `NOT ENFORCED` constraints (before 18.4), the
